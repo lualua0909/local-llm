@@ -34,6 +34,38 @@ function TestProviderRow({ label, children }) {
 }
 
 function TestProviderCard({ providerId, providerStorageAlias, preferredModelId }) {
+  const parseSSEToAssistantText = (raw) => {
+    if (!raw || typeof raw !== "string") return "";
+
+    const lines = raw.split(/\r?\n/);
+    const chunks = [];
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+      const data = trimmed.slice(5).trim();
+      if (!data || data === "[DONE]") continue;
+
+      try {
+        const json = JSON.parse(data);
+        const choice = json?.choices?.[0];
+        const delta = choice?.delta;
+
+        if (typeof delta?.content === "string") {
+          chunks.push(delta.content);
+        } else if (Array.isArray(delta?.content)) {
+          for (const part of delta.content) {
+            if (typeof part?.text === "string") chunks.push(part.text);
+          }
+        }
+      } catch {
+        // Ignore non-JSON SSE payloads
+      }
+    }
+
+    return chunks.join("");
+  };
+
   const models = getModelsByProviderId(providerId).filter((m) => !m.type || m.type === "llm");
   const modelOptions = useMemo(() => {
     if (!preferredModelId || models.some((m) => m.id === preferredModelId)) return models;
@@ -42,6 +74,7 @@ function TestProviderCard({ providerId, providerStorageAlias, preferredModelId }
   const [selectedModel, setSelectedModel] = useState(modelOptions[0]?.id || "");
   const [input, setInput] = useState("Return only the model name you are running.");
   const [apiKey, setApiKey] = useState("");
+  const [streaming, setStreaming] = useState(false);
   const [useTunnel, setUseTunnel] = useState(false);
   const [localEndpoint, setLocalEndpoint] = useState("");
   const [tunnelEndpoint, setTunnelEndpoint] = useState("");
@@ -81,7 +114,7 @@ function TestProviderCard({ providerId, providerStorageAlias, preferredModelId }
   const curlSnippet = `curl -X POST ${endpoint}/v1/chat/completions \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${apiKey || "YOUR_KEY"}" \\
-  -d '{"model":"${modelFull}","messages":[{"role":"user","content":"${input}"}],"stream":false}'`;
+  -d '{"model":"${modelFull}","messages":[{"role":"user","content":"${input}"}],"stream":${streaming}}'`;
 
   const handleRun = async () => {
     if (!input.trim() || !modelFull) return;
@@ -99,15 +132,27 @@ function TestProviderCard({ providerId, providerStorageAlias, preferredModelId }
         headers,
         body: JSON.stringify({
           model: modelFull,
-          stream: false,
+          stream: streaming,
           messages: [{ role: "user", content: input.trim() }],
         }),
       });
 
       const latencyMs = Date.now() - start;
-      const data = await res.json();
+      let data;
+      if (streaming) {
+        const raw = await res.text();
+        const assistantText = parseSSEToAssistantText(raw);
+        data = { stream: true, assistantText, raw };
+      } else {
+        data = await res.json();
+      }
       if (!res.ok) {
-        setError(data?.error?.message || data?.error || `HTTP ${res.status}`);
+        const errorMessage =
+          data?.error?.message ||
+          data?.error ||
+          (typeof data?.raw === "string" ? data.raw.slice(0, 500) : "") ||
+          `HTTP ${res.status}`;
+        setError(errorMessage);
         return;
       }
       setResult({ data, latencyMs });
@@ -186,6 +231,13 @@ function TestProviderCard({ providerId, providerStorageAlias, preferredModelId }
                 <span className="material-symbols-outlined text-[14px]">close</span>
               </button>
             )}
+          </div>
+        </TestProviderRow>
+
+        <TestProviderRow label="Streaming">
+          <div className="flex items-center gap-2">
+            <Toggle checked={streaming} onChange={setStreaming} size="sm" />
+            <span className="text-xs text-text-muted">{streaming ? "On" : "Off"}</span>
           </div>
         </TestProviderRow>
 
